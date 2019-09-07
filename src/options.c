@@ -185,6 +185,11 @@ static const SSL_OPTION ssl_opts[] = {
     {"NO_TLSv1.3", 0},
     {"NO_TLSv1_3", 0}, /* keep compatibility with our typo */
 #endif
+#ifdef SSL_OP_NO_GMTLS
+    {"NO_GMTLS", SSL_OP_NO_GMTLS},
+#else /* ignore if unsupported by OpenSSL */
+    {"NO_GMTLS", 0},
+#endif
     {"PKCS1_CHECK_1", SSL_OP_PKCS1_CHECK_1},
     {"PKCS1_CHECK_2", SSL_OP_PKCS1_CHECK_2},
     {"NETSCAPE_CA_DN_BUG", SSL_OP_NETSCAPE_CA_DN_BUG},
@@ -1428,6 +1433,39 @@ NOEXPORT char *parse_service_option(CMD cmd, SERVICE_OPTIONS **section_ptr,
         break;
     }
 
+    /* cert2 */
+    switch(cmd) {
+    case CMD_SET_DEFAULTS:
+        section->cert2=NULL;
+        break;
+    case CMD_SET_COPY:
+        section->cert2=str_dup_detached(new_service_options.cert2);
+        break;
+    case CMD_FREE:
+        str_free(section->cert2);
+        break;
+    case CMD_SET_VALUE:
+        if(strcasecmp(opt, "cert2"))
+            break;
+        str_free(section->cert2);
+        section->cert2=str_dup_detached(arg);
+        return NULL; /* OK */
+    case CMD_INITIALIZE:
+#ifndef OPENSSL_NO_PSK
+        if(section->psk_keys)
+            break;
+#endif /* !defined(OPENSSL_NO_PSK) */
+#ifndef OPENSSL_NO_ENGINE
+        if(section->engine)
+            break;
+#endif /* !defined(OPENSSL_NO_ENGINE) */
+    case CMD_PRINT_DEFAULTS:
+        break; /* no default certificate */
+    case CMD_PRINT_HELP:
+        s_log(LOG_NOTICE, "%-22s = certificate chain", "cert2");
+        break;
+    }
+
 #if OPENSSL_VERSION_NUMBER>=0x10002000L
 
     /* checkEmail */
@@ -2107,6 +2145,35 @@ NOEXPORT char *parse_service_option(CMD cmd, SERVICE_OPTIONS **section_ptr,
         s_log(LOG_NOTICE, "%-22s = certificate private key", "key");
         break;
     }
+
+    /* key2 */
+    switch(cmd) {
+    case CMD_SET_DEFAULTS:
+        section->key2=NULL;
+        break;
+    case CMD_SET_COPY:
+        section->key2=str_dup_detached(new_service_options.key2);
+        break;
+    case CMD_FREE:
+        str_free(section->key2);
+        break;
+    case CMD_SET_VALUE:
+        if(strcasecmp(opt, "key2"))
+            break;
+        str_free(section->key2);
+        section->key2=str_dup_detached(arg);
+        return NULL; /* OK */
+    case CMD_INITIALIZE:
+        if(section->cert && !section->key2)
+            section->key2=str_dup_detached(section->cert2);
+        break;
+    case CMD_PRINT_DEFAULTS:
+        break;
+    case CMD_PRINT_HELP:
+        s_log(LOG_NOTICE, "%-22s = certificate private key2", "key2");
+        break;
+    }
+
 
     /* libwrap */
 #ifdef USE_LIBWRAP
@@ -3137,6 +3204,9 @@ NOEXPORT char *parse_service_option(CMD cmd, SERVICE_OPTIONS **section_ptr,
 #ifdef TLS1_3_VERSION
             "|TLSv1.3"
 #endif
+#ifdef GMTLS_VERSION
+            "|GMTLS"
+#endif
             " TLS version", "sslVersion");
         break;
     }
@@ -3172,6 +3242,9 @@ NOEXPORT char *parse_service_option(CMD cmd, SERVICE_OPTIONS **section_ptr,
 #ifdef TLS1_3_VERSION
             "|TLSv1.3"
 #endif
+#ifdef GMTLS_VERSION
+            "|GMTLS"
+#endif
             " TLS version", "sslVersionMax");
         break;
     }
@@ -3202,6 +3275,9 @@ NOEXPORT char *parse_service_option(CMD cmd, SERVICE_OPTIONS **section_ptr,
             "|SSLv3|TLSv1|TLSv1.1|TLSv1.2"
 #ifdef TLS1_3_VERSION
             "|TLSv1.3"
+#endif
+#ifdef GMTLS_VERSION
+            "|GMTLS"
 #endif
             " TLS version", "sslVersionMin");
         break;
@@ -3237,7 +3313,7 @@ NOEXPORT char *parse_service_option(CMD cmd, SERVICE_OPTIONS **section_ptr,
         s_log(LOG_NOTICE, "%-22s = all"
             "|SSLv2|SSLv3|TLSv1"
 #if OPENSSL_VERSION_NUMBER>=0x10001000L
-            "|TLSv1.1|TLSv1.2"
+            "|TLSv1.1|TLSv1.2|GMTLS"
 #endif /* OPENSSL_VERSION_NUMBER>=0x10001000L */
             " TLS method", "sslVersion");
         break;
@@ -3776,6 +3852,11 @@ NOEXPORT int str_to_proto_version(const char *name) {
     if(!strcasecmp(name, "TLSv1.3"))
         return TLS1_3_VERSION;
 #endif
+#ifndef NOGMTLS 
+    if(!strcasecmp(name, "GMTLS"))
+        return GMTLS_VERSION;
+#endif
+
     return -1;
 }
 
@@ -3830,6 +3911,13 @@ NOEXPORT char *tls_methods_set(SERVICE_OPTIONS *section, const char *arg) {
 #else /* OPENSSL_NO_TLS1_2 */
         return "TLSv1.2 not supported";
 #endif /* !OPENSSL_NO_TLS1_2 */
+    } else if(!strcasecmp(arg, "GMTLS")) {
+#ifndef OPENSSL_NO_GMTLS
+        section->client_method=(SSL_METHOD *)GMTLS_client_method();
+        section->server_method=(SSL_METHOD *)GMTLS_server_method();
+#else /* OPENSSL_NO_GMTLS */
+        return "GMTLS not supported";
+#endif /* !OPENSSL_NO_GMTLS*/
     } else
         return "Incorrect version of TLS protocol";
     return NULL; /* OK */

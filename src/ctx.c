@@ -79,11 +79,13 @@ NOEXPORT unsigned psk_server_callback(SSL *, const char *,
 #endif /* !defined(OPENSSL_NO_PSK) */
 NOEXPORT int load_cert_file(SERVICE_OPTIONS *);
 NOEXPORT int load_key_file(SERVICE_OPTIONS *);
+NOEXPORT int load_cert_key_file(SERVICE_OPTIONS *, char *, char *);
 NOEXPORT int pkcs12_extension(const char *);
-NOEXPORT int load_pkcs12_file(SERVICE_OPTIONS *);
+NOEXPORT int load_pkcs12_file(SERVICE_OPTIONS *, char*);
 #ifndef OPENSSL_NO_ENGINE
 NOEXPORT int load_cert_engine(SERVICE_OPTIONS *);
 NOEXPORT int load_key_engine(SERVICE_OPTIONS *);
+NOEXPORT int load_cert_key_engine(SERVICE_OPTIONS *, char *, char *);
 #endif
 NOEXPORT int cache_passwd_get_cb(char *, int, int, void *);
 NOEXPORT int cache_passwd_set_cb(char *, int, int, void *);
@@ -559,8 +561,7 @@ NOEXPORT int conf_init(SERVICE_OPTIONS *section) {
 /**************************************** initialize authentication */
 
 NOEXPORT int auth_init(SERVICE_OPTIONS *section) {
-    int cert_needed=1, key_needed=1;
-
+    int cert_key_needed = 1, cert_key_needed2 = 1;
     /* initialize PSK */
 #ifndef OPENSSL_NO_PSK
     if(section->psk_keys) {
@@ -592,21 +593,34 @@ NOEXPORT int auth_init(SERVICE_OPTIONS *section) {
         s_log(LOG_DEBUG, "No certificate or private key specified");
         return 0; /* OK */
     }
+    if ((section->cert2 || section->key2 ) && (!section->cert2 || !section->key2)){
+        s_log(LOG_DEBUG, "No certificate2 or private key2 specified");
+        return 0; /* OK */
+    }
 #ifndef OPENSSL_NO_ENGINE
     if(section->engine) { /* try to use the engine first */
-        cert_needed=load_cert_engine(section);
-        key_needed=load_key_engine(section);
+        cert_key_needed = load_cert_key_engine(section, section->cert, section->key);
+        if (section->cert2 || section->key2)
+            cert_key_needed2 = load_cert_key_engine(section, section->cert2, section->key2);
     }
 #endif
-    if (cert_needed && pkcs12_extension(section->cert)) {
-        if (load_pkcs12_file(section)) {
+    if (cert_key_needed && pkcs12_extension(section->cert)) {
+        if (load_pkcs12_file(section, section->cert)) {
             return 1; /* FAILED */
         }
-        cert_needed=key_needed=0; /* don't load any PEM files */
+        cert_key_needed=0; /* don't load any PEM files */
     }
-    if(cert_needed && load_cert_file(section))
+     if (cert_key_needed2 && pkcs12_extension(section->cert2)) {
+        if (load_pkcs12_file(section, section->cert2)) {
+            return 1; /* FAILED */
+        }
+        cert_key_needed2=0; /* don't load any PEM files */
+    }
+
+    if (cert_key_needed && load_cert_key_file(section, section->cert, section->key))
         return 1; /* FAILED */
-    if(key_needed && load_key_file(section))
+
+    if (cert_key_needed2 && load_cert_key_file(section, section->cert2, section->key2))
         return 1; /* FAILED */
 
     /* validate the private key against the certificate */
@@ -719,7 +733,7 @@ NOEXPORT int pkcs12_extension(const char *filename) {
     return ext && (!strcasecmp(ext, ".p12") || !strcasecmp(ext, ".pfx"));
 }
 
-NOEXPORT int load_pkcs12_file(SERVICE_OPTIONS *section) {
+NOEXPORT int load_pkcs12_file(SERVICE_OPTIONS *section, char *cert_file) {
     size_t len;
     int i, success;
     BIO *bio=NULL;
@@ -730,11 +744,11 @@ NOEXPORT int load_pkcs12_file(SERVICE_OPTIONS *section) {
     char pass[PEM_BUFSIZE];
 
     s_log(LOG_INFO, "Loading certificate and private key from file: %s",
-        section->cert);
-    if(file_permissions(section->cert))
+        cert);
+    if(file_permissions(cert_file))
         return 1; /* FAILED */
 
-    bio=BIO_new_file(section->cert, "rb");
+    bio=BIO_new_file(cert_file, "rb");
     if(!bio) {
         sslerror("BIO_new_file");
         return 1; /* FAILED */
@@ -748,7 +762,7 @@ NOEXPORT int load_pkcs12_file(SERVICE_OPTIONS *section) {
     BIO_free(bio);
 
     /* try the cached value first */
-    set_prompt(section->cert);
+    set_prompt(cert_file);
     len=(size_t)cache_passwd_get_cb(pass, sizeof pass, 0, NULL);
     if(len>=sizeof pass)
         len=sizeof pass-1;
@@ -789,7 +803,7 @@ NOEXPORT int load_pkcs12_file(SERVICE_OPTIONS *section) {
         return 1; /* FAILED */
     }
     s_log(LOG_INFO, "Certificate and private key loaded from file: %s",
-        section->cert);
+        cert);
     return 0; /* OK */
 }
 
@@ -836,6 +850,56 @@ NOEXPORT int load_key_file(SERVICE_OPTIONS *section) {
         return 1; /* FAILED */
     }
     s_log(LOG_INFO, "Private key loaded from file: %s", section->key);
+    return 0; /* OK */
+}
+
+NOEXPORT int load_cert_key_file(SERVICE_OPTIONS *section, char *cert, char *key){
+    /* load cert */
+    {
+        s_log(LOG_INFO, "Loading certificate from file: %s", cert);
+        if(!SSL_CTX_use_certificate_chain_file(section->ctx, cert)) {
+            sslerror("SSL_CTX_use_certificate_chain_file");
+            return 1; /* FAILED */
+        }
+        s_log(LOG_INFO, "Certificate loaded from file: %s", cert);
+        /* OK */
+    }
+    /* load key */
+    {
+        int i, success;
+
+        s_log(LOG_INFO, "Loading private key from file: %s", key);
+        if(file_permissions(key))
+            return 1; /* FAILED */
+
+        /* try the cached value first */
+        set_prompt(key);
+        SSL_CTX_set_default_passwd_cb(section->ctx, cache_passwd_get_cb);
+        success=SSL_CTX_use_PrivateKey_file(section->ctx, key,
+            SSL_FILETYPE_PEM);
+        /* invoke the UI on subsequent calls */
+        SSL_CTX_set_default_passwd_cb(section->ctx, cache_passwd_set_cb);
+
+        /* invoke the UI */
+        for(i=0; !success && i<3; i++) {
+            if(!ui_retry())
+                break;
+            if(i==0) { /* silence the cached attempt */
+                ERR_clear_error();
+            } else {
+                sslerror_queue(); /* dump the error queue */
+                s_log(LOG_ERR, "Wrong passphrase: retrying");
+            }
+            success=SSL_CTX_use_PrivateKey_file(section->ctx, key,
+                SSL_FILETYPE_PEM);
+        }
+        if(!success) {
+            sslerror("SSL_CTX_use_PrivateKey_file");
+            return 1; /* FAILED */
+        }
+        s_log(LOG_INFO, "Private key loaded from file: %s", key);
+        /* OK */
+    }
     return 0; /* OK */
 }
 
@@ -890,6 +954,62 @@ NOEXPORT int load_key_engine(SERVICE_OPTIONS *section) {
         return 1; /* FAILED */
     }
     s_log(LOG_INFO, "Private key initialized on engine ID: %s", section->key);
+    return 0; /* OK */
+}
+
+NOEXPORT int load_cert_key_engine(SERVICE_OPTIONS *section, char *cert, char *key) {
+    /* cert */
+    {
+        struct {
+            const char *id;
+            X509 *cert;
+        } parms;
+
+        s_log(LOG_INFO, "Loading certificate from engine ID: %s", cert);
+        parms.id=cert;
+        parms.cert=NULL;
+        ENGINE_ctrl_cmd(section->engine, "LOAD_CERT_CTRL", 0, &parms, NULL, 1);
+        if(!parms.cert) {
+            sslerror("ENGINE_ctrl_cmd");
+            return 1; /* FAILED */
+        }
+        if(!SSL_CTX_use_certificate(section->ctx, parms.cert)) {
+            sslerror("SSL_CTX_use_certificate");
+            return 1; /* FAILED */
+        }
+        s_log(LOG_INFO, "Certificate loaded from engine ID: %s", cert);
+        /* OK */
+    }
+    /* key */
+    {
+        int i;
+        EVP_PKEY *pkey;
+
+        s_log(LOG_INFO, "Initializing private key on engine ID: %s", key);
+
+        /* do not use caching for engine PINs to prevent device lockout */
+        SSL_CTX_set_default_passwd_cb(section->ctx, ui_passwd_cb);
+
+        for(i=0; i<3; i++) {
+            pkey=ENGINE_load_private_key(section->engine, key,
+                UI_stunnel(), NULL);
+            if(!pkey) {
+                if(i<2 && ui_retry()) { /* wrong PIN */
+                    sslerror_queue(); /* dump the error queue */
+                    s_log(LOG_ERR, "Wrong PIN: retrying");
+                    continue;
+                }
+                sslerror("ENGINE_load_private_key");
+                return 1; /* FAILED */
+            }
+            if(SSL_CTX_use_PrivateKey(section->ctx, pkey))
+                break; /* success */
+            sslerror("SSL_CTX_use_PrivateKey");
+            return 1; /* FAILED */
+        }
+        s_log(LOG_INFO, "Private key initialized on engine ID: %s", key);
+        /* OK */
+    }
     return 0; /* OK */
 }
 
